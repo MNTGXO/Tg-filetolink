@@ -1,0 +1,16 @@
+name = "tg-file-proxy"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+[vars]
+# Your Koyeb public URL (no trailing slash). Edit before deploying.
+BACKEND_URL = "https://your-app-your-org.koyeb.app"
+
+# Optional keep-alive: pings /health every 30 minutes so Koyeb stays awake.
+# Delete this block if you prefer scale-to-zero.
+[triggers]
+crons = ["*/30 * * * *"]
+
+# Secrets (never put these in this file):
+#   wrangler secret put HMAC_SECRET
+#   wrangler secret put WORKER_SECRET
