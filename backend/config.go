@@ -28,6 +28,7 @@ type Config struct {
 	Admins       map[int64]struct{} // may use /fsub, /broadcast, /stats; bypass fsub
 	MongoURI     string
 	MongoDB      string
+	LinkTTL      time.Duration // how long signed links stay valid
 }
 
 // LoadConfig reads and validates the environment.
@@ -124,6 +125,15 @@ func LoadConfig() (*Config, error) {
 		mongoDB = "tgstream"
 	}
 
+	linkHours := 5
+	if v := strings.TrimSpace(os.Getenv("LINK_TTL_HOURS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("LINK_TTL_HOURS must be a positive integer")
+		}
+		linkHours = n
+	}
+
 	port := strings.TrimSpace(os.Getenv("PORT"))
 	if port == "" {
 		port = "8000"
@@ -162,5 +172,6 @@ func LoadConfig() (*Config, error) {
 		Admins:       admins,
 		MongoURI:     mongoURI,
 		MongoDB:      mongoDB,
+		LinkTTL:      time.Duration(linkHours) * time.Hour,
 	}, nil
 }

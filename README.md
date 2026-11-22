@@ -20,7 +20,7 @@ tg-filelink/
 ```
 
 Flow: user sends file to the primary bot -> bot copies it to `BIN_CHANNEL` -> bot replies with
-`WORKER_URL/dl/<msg_id>?hash=<hmac>` -> Worker verifies the HMAC and proxies to
+`WORKER_URL/dl/<msg_id>?exp=<unix>&hash=<hmac>` -> Worker verifies the HMAC and expiry (`410` once expired) and proxies to
 `KOYEB/stream/<msg_id>` with `X-Worker-Secret` -> backend streams `upload.GetFile` chunks.
 
 ## Environment variables (Koyeb)
@@ -37,6 +37,7 @@ Flow: user sends file to the primary bot -> bot copies it to `BIN_CHANNEL` -> bo
 | `ALLOWED_USERS` | no | comma-separated user ids; empty = anyone |
 | `PORT` | no | default `8000` |
 | `META_TTL_MINUTES` | no | default `30` |
+| `LINK_TTL_HOURS` | no | how long a link stays valid, default `5` |
 | `MONGO_URI` | yes | MongoDB connection string (Atlas free tier works) |
 | `MONGO_DB` | no | database name, default `tgstream` |
 | `ADMINS` | no | comma-separated user ids allowed to use admin commands |
