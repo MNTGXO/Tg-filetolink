@@ -1,7 +1,7 @@
 // Cloudflare Worker edge proxy for the Go MTProto streaming backend on Koyeb.
 //
 // Routes:
-//   GET|HEAD /dl/<message_id>?hash=<hex hmac>[&inline=1]  -> verified, streamed from backend
+//   GET|HEAD /dl/<message_id>?exp=<unix>&hash=<hex hmac>[&inline=1]  -> verified, streamed from backend
 //   GET      /health                                      -> worker liveness
 //
 // Secrets (wrangler secret put): HMAC_SECRET, WORKER_SECRET
@@ -34,11 +34,11 @@ function hexToBytes(hex) {
 }
 
 // crypto.subtle.verify performs a constant-time comparison.
-async function validSignature(env, id, hash) {
+async function validSignature(env, payload, hash) {
   const sig = hexToBytes(hash);
   if (!sig) return false;
   const key = await getKey(env);
-  return crypto.subtle.verify("HMAC", key, sig, encoder.encode(id));
+  return crypto.subtle.verify("HMAC", key, sig, encoder.encode(payload));
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -108,8 +108,16 @@ export default {
     }
 
     const id = m[1];
-    if (!(await validSignature(env, id, url.searchParams.get("hash")))) {
+    const expStr = url.searchParams.get("exp") || "";
+    if (
+      !/^\d{1,12}$/.test(expStr) ||
+      !(await validSignature(env, `${id}:${expStr}`, url.searchParams.get("hash")))
+    ) {
       return text("Forbidden", 403);
+    }
+    // The expiry is covered by the signature, so it cannot be extended.
+    if (Number(expStr) < Math.floor(Date.now() / 1000)) {
+      return text("Link expired. Send the file to the bot again for a new link.", 410);
     }
 
     const backendUrl =

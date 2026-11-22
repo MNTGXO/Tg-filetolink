@@ -18,11 +18,12 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-// signID returns the hex HMAC-SHA256 of the message id. The Worker recomputes
-// it with the same HMAC_SECRET, so links cannot be forged or enumerated.
-func signID(secret string, id int) string {
+// signLink returns the hex HMAC-SHA256 of "<message id>:<expiry unix time>".
+// The Worker recomputes it with the same HMAC_SECRET, so links can neither be
+// forged nor have their expiry extended.
+func signLink(secret string, id int, exp int64) string {
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(strconv.Itoa(id)))
+	mac.Write([]byte(strconv.Itoa(id) + ":" + strconv.FormatInt(exp, 10)))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 

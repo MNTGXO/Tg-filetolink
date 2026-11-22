@@ -208,12 +208,13 @@ func (b *Bot) handleFile(ctx context.Context, api *tg.Client, say func(string) e
 		return say("Could not determine the stored message id. Please try again.")
 	}
 
-	sig := signID(b.cfg.HMACSecret, binID)
-	dl := fmt.Sprintf("%s/dl/%d?hash=%s", b.cfg.WorkerURL, binID, sig)
+	exp := time.Now().Add(b.cfg.LinkTTL).Unix()
+	sig := signLink(b.cfg.HMACSecret, binID, exp)
+	dl := fmt.Sprintf("%s/dl/%d?exp=%d&hash=%s", b.cfg.WorkerURL, binID, exp, sig)
 	st := dl + "&inline=1"
 
-	return say(fmt.Sprintf("Your link is ready\n\nFile: %s\nSize: %s\n\nDownload:\n%s\n\nStream:\n%s",
-		meta.Name, humanSize(meta.Size), dl, st))
+	return say(fmt.Sprintf("Your link is ready\n\nFile: %s\nSize: %s\n\nDownload:\n%s\n\nStream:\n%s\n\nLinks expire in %s.",
+		meta.Name, humanSize(meta.Size), dl, st, b.cfg.LinkTTL.Round(time.Minute)))
 }
 
 // ---------------------------------------------------------------------------
