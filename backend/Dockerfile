@@ -13,7 +13,7 @@ RUN apk add --no-cache git ca-certificates
 
 WORKDIR /src
 COPY go.mod go.sum* ./
-COPY *.go ./
+COPY *.go start.mp4 ./
 
 # Resolves the latest gotd/td and writes go.sum if it is not committed yet.
 RUN go mod tidy && \

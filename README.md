@@ -53,9 +53,14 @@ Generate secrets with `openssl rand -hex 32`.
 | `/fsub off` | Disable force-subscribe |
 | `/broadcast` | Reply to any message with it to send that message to all users |
 | `/broadcast <text>` | Broadcast plain text |
-| `/stats` | User count, fsub status, ready bot clients |
+| `/stats` | User count, banned count, fsub status, ready bot clients |
+| `/ban <user_id> [reason]` | Block a user from using the bot |
+| `/unban <user_id>` | Lift a ban |
 
 Notes:
+- Every file a user sends is copied to `BIN_CHANNEL`, followed by a message with the sender's name, username and id plus a ready-to-use `/ban <id>` line. Links are download-only (no inline/stream link). Consider telling users in your start text that files are logged.
+- Banning stops new links; links already issued stay valid until they expire.
+- `/start` sends the embedded `backend/start.mp4` with the welcome text as its caption (it falls back to plain text if the upload fails).
 - The primary bot must be an **admin** in every fsub chat (needed to check membership and, for private chats, to create the invite link).
 - Users are saved with their id and access hash (Telegram needs the hash to message them again). Users who block the bot are removed during a broadcast.
 - Admins bypass force-subscribe. If a membership check fails (for example the bot lost admin rights), users are let through rather than locked out.

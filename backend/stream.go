@@ -629,13 +629,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	if ct == "" {
 		ct = "application/octet-stream"
 	}
-	disposition := "attachment"
-	if r.URL.Query().Get("inline") == "1" {
-		disposition = "inline"
-	}
-	cd := mime.FormatMediaType(disposition, map[string]string{"filename": e.meta.Name})
+	// Download only: always an attachment, never rendered inline.
+	cd := mime.FormatMediaType("attachment", map[string]string{"filename": e.meta.Name})
 	if cd == "" {
-		cd = disposition
+		cd = "attachment"
 	}
 
 	length := end - start + 1
