@@ -39,7 +39,7 @@ type Worker struct {
 	mu      sync.Mutex
 	client  *telegram.Client
 	runCtx  context.Context
-	channel *tg.InputChannel
+	channels map[int64]*tg.InputChannel // bare channel id -> resolved input channel
 	dcs     map[int]*dcConn
 }
 
@@ -154,7 +154,7 @@ func (w *Worker) attach(ctx context.Context, c *telegram.Client) {
 	w.mu.Lock()
 	w.client = c
 	w.runCtx = ctx
-	w.channel = nil
+	w.channels = make(map[int64]*tg.InputChannel)
 	w.dcs = make(map[int]*dcConn)
 	w.mu.Unlock()
 
@@ -177,7 +177,7 @@ func (w *Worker) detach() {
 	w.dcs = make(map[int]*dcConn)
 	w.client = nil
 	w.runCtx = nil
-	w.channel = nil
+	w.channels = make(map[int64]*tg.InputChannel)
 	w.mu.Unlock()
 }
 
@@ -212,7 +212,7 @@ func (p *Pool) Acquire() (*Worker, func()) {
 // The bot must be a member/admin of the channel.
 func (w *Worker) inputChannel(ctx context.Context, channelID int64) (*tg.InputChannel, error) {
 	w.mu.Lock()
-	ch := w.channel
+	ch := w.channels[channelID]
 	w.mu.Unlock()
 	if ch != nil {
 		return ch, nil
@@ -238,7 +238,10 @@ func (w *Worker) inputChannel(ctx context.Context, channelID int64) (*tg.InputCh
 	ch = &tg.InputChannel{ChannelID: channelID, AccessHash: hash}
 
 	w.mu.Lock()
-	w.channel = ch
+	if w.channels == nil {
+		w.channels = make(map[int64]*tg.InputChannel)
+	}
+	w.channels[channelID] = ch
 	w.mu.Unlock()
 	return ch, nil
 }

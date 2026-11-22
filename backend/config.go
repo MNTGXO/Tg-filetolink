@@ -25,11 +25,15 @@ type Config struct {
 	MetaTTL      time.Duration
 	MetaMax      int
 	AllowedUsers map[int64]struct{} // empty = everyone allowed
+	Admins       map[int64]struct{} // may use /fsub, /broadcast, /stats; bypass fsub
+	MongoURI     string
+	MongoDB      string
 }
 
 // LoadConfig reads and validates the environment.
 //
-// Required: API_ID, API_HASH, BOT_TOKEN, BIN_CHANNEL, WORKER_URL, HMAC_SECRET, WORKER_SECRET
+// Required: API_ID, API_HASH, BOT_TOKEN, BIN_CHANNEL, WORKER_URL, HMAC_SECRET, WORKER_SECRET, MONGO_URI
+// Also: ADMINS (comma-separated user ids), MONGO_DB (default tgstream)
 // Optional: MULTI_TOKENS (comma-separated extra bot tokens), ALLOWED_USERS (comma-separated
 // user ids), PORT (default 8000), META_TTL_MINUTES (default 30), META_CACHE_MAX (default 2000).
 func LoadConfig() (*Config, error) {
@@ -49,6 +53,7 @@ func LoadConfig() (*Config, error) {
 	workerURL := get("WORKER_URL")
 	hmacSecret := get("HMAC_SECRET")
 	workerSecret := get("WORKER_SECRET")
+	mongoURI := get("MONGO_URI")
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
 	}
@@ -101,6 +106,24 @@ func LoadConfig() (*Config, error) {
 		allowed[id] = struct{}{}
 	}
 
+	admins := map[int64]struct{}{}
+	for _, s := range strings.Split(os.Getenv("ADMINS"), ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("ADMINS contains a non-numeric id %q", s)
+		}
+		admins[id] = struct{}{}
+	}
+
+	mongoDB := strings.TrimSpace(os.Getenv("MONGO_DB"))
+	if mongoDB == "" {
+		mongoDB = "tgstream"
+	}
+
 	port := strings.TrimSpace(os.Getenv("PORT"))
 	if port == "" {
 		port = "8000"
@@ -136,5 +159,8 @@ func LoadConfig() (*Config, error) {
 		MetaTTL:      time.Duration(ttlMin) * time.Minute,
 		MetaMax:      metaMax,
 		AllowedUsers: allowed,
+		Admins:       admins,
+		MongoURI:     mongoURI,
+		MongoDB:      mongoDB,
 	}, nil
 }
