@@ -10,7 +10,10 @@ tg-filelink/
 │   ├── config.go     env loader
 │   ├── pool.go       multi-token gotd client pool (least-busy picker, DC media pools)
 │   ├── stream.go     TTL metadata cache, Range parser, aligned GetFile streamer, /health
-│   └── main.go       primary bot handler, HTTP server, graceful shutdown
+│   ├── db.go         MongoDB store (users, fsub list)
+│   ├── fsub.go       force-subscribe checks
+│   ├── bot.go        bot handlers: files, /fsub, /broadcast, /stats
+│   └── main.go       wiring, HTTP server, graceful shutdown
 └── worker/
     ├── worker.js     HMAC check, zero-copy proxy, cold-start retry, cron ping
     └── wrangler.toml
@@ -34,8 +37,28 @@ Flow: user sends file to the primary bot -> bot copies it to `BIN_CHANNEL` -> bo
 | `ALLOWED_USERS` | no | comma-separated user ids; empty = anyone |
 | `PORT` | no | default `8000` |
 | `META_TTL_MINUTES` | no | default `30` |
+| `MONGO_URI` | yes | MongoDB connection string (Atlas free tier works) |
+| `MONGO_DB` | no | database name, default `tgstream` |
+| `ADMINS` | no | comma-separated user ids allowed to use admin commands |
 
 Generate secrets with `openssl rand -hex 32`.
+
+## Bot commands (admins only, in private chat)
+
+| Command | What it does |
+|---|---|
+| `/fsub <chat_id> [chat_id2 ...]` | Require users to join these chats (max 5, ids like `-100...`) before getting links |
+| `/fsub` | Show the current setting |
+| `/fsub off` | Disable force-subscribe |
+| `/broadcast` | Reply to any message with it to send that message to all users |
+| `/broadcast <text>` | Broadcast plain text |
+| `/stats` | User count, fsub status, ready bot clients |
+
+Notes:
+- The primary bot must be an **admin** in every fsub chat (needed to check membership and, for private chats, to create the invite link).
+- Users are saved with their id and access hash (Telegram needs the hash to message them again). Users who block the bot are removed during a broadcast.
+- Admins bypass force-subscribe. If a membership check fails (for example the bot lost admin rights), users are let through rather than locked out.
+- Join-request-only chats are not detected as joined until the request is approved.
 
 ## Prerequisites
 
