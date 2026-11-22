@@ -2,26 +2,52 @@ package main
 
 import (
 	"context"
-	_ "embed"
+	"errors"
 	"fmt"
 	"log"
+	"net/url"
+	"strconv"
+	"strings"
 
-	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 )
 
-// startVideo is shown with the /start message. It is embedded in the binary,
-// uploaded to Telegram once per process start and then re-sent by reference.
-//
-//go:embed start.mp4
-var startVideo []byte
+// The start video is not uploaded by the bot. It is read once from an existing
+// Telegram post (START_VIDEO_LINK, e.g. https://t.me/mntgxo/230) and re-sent
+// by reference, so /start never uploads anything.
 
-// Properties of start.mp4 (1920x1080, ~6.5 s) so Telegram plays it inline.
-const (
-	startVideoWidth    = 1920
-	startVideoHeight   = 1080
-	startVideoDuration = 7
-)
+type videoRef struct {
+	username  string // public channel username, or ""
+	channelID int64  // bare channel id for t.me/c/<id>/<msg> links
+	msgID     int
+}
+
+func parseMessageLink(link string) (videoRef, error) {
+	u, err := url.Parse(strings.TrimSpace(link))
+	if err != nil || u.Host == "" {
+		return videoRef{}, fmt.Errorf("invalid START_VIDEO_LINK %q", link)
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+
+	// Private channel: t.me/c/<channel id>/<message id>
+	if len(parts) >= 3 && parts[0] == "c" {
+		cid, err1 := strconv.ParseInt(parts[1], 10, 64)
+		mid, err2 := strconv.Atoi(parts[2])
+		if err1 != nil || err2 != nil || cid <= 0 || mid <= 0 {
+			return videoRef{}, fmt.Errorf("invalid START_VIDEO_LINK %q", link)
+		}
+		return videoRef{channelID: cid, msgID: mid}, nil
+	}
+	// Public channel: t.me/<username>/<message id>
+	if len(parts) >= 2 {
+		mid, err := strconv.Atoi(parts[1])
+		if err != nil || mid <= 0 || parts[0] == "" {
+			return videoRef{}, fmt.Errorf("invalid START_VIDEO_LINK %q", link)
+		}
+		return videoRef{username: parts[0], msgID: mid}, nil
+	}
+	return videoRef{}, fmt.Errorf("invalid START_VIDEO_LINK %q", link)
+}
 
 func (b *Bot) cachedStartMedia() tg.InputMediaClass {
 	b.startMu.Lock()
@@ -35,25 +61,72 @@ func (b *Bot) setStartMedia(m tg.InputMediaClass) {
 	b.startMu.Unlock()
 }
 
-// mediaFromUpdates extracts the media of the message just sent.
-func mediaFromUpdates(upd tg.UpdatesClass) tg.MessageMediaClass {
-	switch v := upd.(type) {
-	case *tg.UpdateShortSentMessage:
-		return v.Media
-	case *tg.Updates:
-		for _, u := range v.Updates {
-			if nm, ok := u.(*tg.UpdateNewMessage); ok {
-				if m, ok := nm.Message.(*tg.Message); ok {
-					return m.Media
-				}
+// fetchStartMedia reads the post and returns its document as input media.
+func (b *Bot) fetchStartMedia(ctx context.Context, api *tg.Client) (tg.InputMediaClass, error) {
+	ref, err := parseMessageLink(b.cfg.StartVideo)
+	if err != nil {
+		return nil, err
+	}
+
+	var ch *tg.InputChannel
+	if ref.username == "" {
+		ch, err = b.pool.Primary().inputChannel(ctx, ref.channelID)
+		if err != nil {
+			return nil, fmt.Errorf("cannot read the private channel (add the bot to it): %w", err)
+		}
+	} else {
+		res, err := api.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{Username: ref.username})
+		if err != nil {
+			return nil, fmt.Errorf("resolve @%s: %w", ref.username, err)
+		}
+		for _, c := range res.Chats {
+			if chn, ok := c.(*tg.Channel); ok {
+				ch = &tg.InputChannel{ChannelID: chn.ID, AccessHash: chn.AccessHash}
+				break
 			}
 		}
+		if ch == nil {
+			return nil, fmt.Errorf("@%s is not a channel", ref.username)
+		}
 	}
-	return nil
+
+	res, err := api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
+		Channel: ch,
+		ID:      []tg.InputMessageClass{&tg.InputMessageID{ID: ref.msgID}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read message %d: %w", ref.msgID, err)
+	}
+	g, ok := res.(interface{ GetMessages() []tg.MessageClass })
+	if !ok {
+		return nil, errors.New("unexpected response")
+	}
+	for _, mc := range g.GetMessages() {
+		msg, ok := mc.(*tg.Message)
+		if !ok || msg.ID != ref.msgID {
+			continue
+		}
+		md, ok := msg.Media.(*tg.MessageMediaDocument)
+		if !ok {
+			break
+		}
+		doc, ok := md.Document.AsNotEmpty()
+		if !ok {
+			break
+		}
+		return &tg.InputMediaDocument{
+			ID: &tg.InputDocument{
+				ID:            doc.ID,
+				AccessHash:    doc.AccessHash,
+				FileReference: doc.FileReference,
+			},
+		}, nil
+	}
+	return nil, fmt.Errorf("message %d has no video (deleted, or not a video/document)", ref.msgID)
 }
 
-// sendStart sends the start video with welcomeText as its caption. If anything
-// goes wrong it falls back to the plain text message.
+// sendStart sends the video with welcomeText as its caption; on any failure it
+// falls back to the plain text message.
 func (b *Bot) sendStart(ctx context.Context, api *tg.Client, say func(string) error, user *tg.User) error {
 	if err := b.sendStartVideo(ctx, api, user); err != nil {
 		log.Printf("start video: %v", err)
@@ -65,8 +138,18 @@ func (b *Bot) sendStart(ctx context.Context, api *tg.Client, say func(string) er
 func (b *Bot) sendStartVideo(ctx context.Context, api *tg.Client, user *tg.User) error {
 	peer := &tg.InputPeerUser{UserID: user.ID, AccessHash: user.AccessHash}
 
-	// Fast path: re-send the already uploaded video by reference.
-	if media := b.cachedStartMedia(); media != nil {
+	media := b.cachedStartMedia()
+	var lastErr error
+	// Two attempts: the second one refreshes the media (expired file reference).
+	for attempt := 0; attempt < 2; attempt++ {
+		if media == nil {
+			m, err := b.fetchStartMedia(ctx, api)
+			if err != nil {
+				return err
+			}
+			media = m
+			b.setStartMedia(media)
+		}
 		rid, err := randomID()
 		if err != nil {
 			return err
@@ -80,52 +163,9 @@ func (b *Bot) sendStartVideo(ctx context.Context, api *tg.Client, user *tg.User)
 		if err == nil {
 			return nil
 		}
-		log.Printf("start video: cached media rejected (%v); uploading again", err)
+		lastErr = err
+		media = nil
 		b.setStartMedia(nil)
 	}
-
-	// Slow path: upload once, then cache the document reference.
-	file, err := uploader.NewUploader(api).FromBytes(ctx, "start.mp4", startVideo)
-	if err != nil {
-		return fmt.Errorf("upload: %w", err)
-	}
-	rid, err := randomID()
-	if err != nil {
-		return err
-	}
-	upd, err := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
-		Peer: peer,
-		Media: &tg.InputMediaUploadedDocument{
-			File:     file,
-			MimeType: "video/mp4",
-			Attributes: []tg.DocumentAttributeClass{
-				&tg.DocumentAttributeVideo{
-					SupportsStreaming: true,
-					W:                 startVideoWidth,
-					H:                 startVideoHeight,
-					Duration:          startVideoDuration,
-				},
-				&tg.DocumentAttributeFilename{FileName: "start.mp4"},
-			},
-		},
-		Message:  welcomeText,
-		RandomID: rid,
-	})
-	if err != nil {
-		return fmt.Errorf("send: %w", err)
-	}
-
-	if md, ok := mediaFromUpdates(upd).(*tg.MessageMediaDocument); ok {
-		if doc, ok := md.Document.AsNotEmpty(); ok {
-			b.setStartMedia(&tg.InputMediaDocument{
-				ID: &tg.InputDocument{
-					ID:            doc.ID,
-					AccessHash:    doc.AccessHash,
-					FileReference: doc.FileReference,
-				},
-			})
-		}
-	}
-	return nil
+	return lastErr
 }
-
