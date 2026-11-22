@@ -18,7 +18,7 @@ import (
 	"github.com/gotd/td/tgerr"
 )
 
-const welcomeText = "Send or forward me any file, video, audio or photo and I will reply with a direct download link and a stream link."
+const welcomeText = "Send or forward me any file, video, audio or photo and I will reply with a direct download link."
 
 // Bot holds the primary bot's handlers and state.
 type Bot struct {
@@ -29,6 +29,9 @@ type Bot struct {
 
 	broadcasting atomic.Bool
 	seen         sync.Map // user ids already persisted in this process
+
+	startMu    sync.Mutex
+	startMedia tg.InputMediaClass // cached start video (document reference)
 }
 
 func NewBot(ctx context.Context, cfg *Config, pool *Pool, store *Store) *Bot {
@@ -139,10 +142,16 @@ func (b *Bot) onMessage(ctx context.Context, e tg.Entities, u *tg.UpdateNewMessa
 	b.trackUser(ctx, user)
 	admin := b.isAdmin(user.ID)
 
+	if !admin && b.store.IsBanned(user.ID) {
+		return say("You are banned from using this bot.")
+	}
+
 	if msg.Media == nil {
 		cmd, rest := parseCommand(strings.TrimSpace(msg.Message))
 		switch cmd {
-		case "start", "help":
+		case "start":
+			return b.sendStart(ctx, api, say, user)
+		case "help":
 			return say(welcomeText)
 		case "fsub":
 			if admin {
@@ -155,6 +164,14 @@ func (b *Bot) onMessage(ctx context.Context, e tg.Entities, u *tg.UpdateNewMessa
 		case "stats":
 			if admin {
 				return b.cmdStats(ctx, say)
+			}
+		case "ban":
+			if admin {
+				return b.cmdBan(ctx, say, rest)
+			}
+		case "unban":
+			if admin {
+				return b.cmdUnban(ctx, say, rest)
 			}
 		}
 	}
@@ -211,10 +228,12 @@ func (b *Bot) handleFile(ctx context.Context, api *tg.Client, say func(string) e
 	exp := time.Now().Add(b.cfg.LinkTTL).Unix()
 	sig := signLink(b.cfg.HMACSecret, binID, exp)
 	dl := fmt.Sprintf("%s/dl/%d?exp=%d&hash=%s", b.cfg.WorkerURL, binID, exp, sig)
-	st := dl + "&inline=1"
 
-	return say(fmt.Sprintf("Your link is ready\n\nFile: %s\nSize: %s\n\nDownload:\n%s\n\nStream:\n%s\n\nLinks expire in %s.",
-		meta.Name, humanSize(meta.Size), dl, st, b.cfg.LinkTTL.Round(time.Minute)))
+	// Tell the admins who sent this file so abusive users can be banned.
+	b.logUpload(ctx, api, ch, user, meta, binID)
+
+	return say(fmt.Sprintf("Your link is ready\n\nFile: %s\nSize: %s\n\nDownload:\n%s\n\nThe link expires in %s.",
+		meta.Name, humanSize(meta.Size), dl, b.cfg.LinkTTL.Round(time.Minute)))
 }
 
 // ---------------------------------------------------------------------------
@@ -294,8 +313,8 @@ func (b *Bot) cmdStats(ctx context.Context, say func(string) error) error {
 	if c := b.store.Fsub(); len(c) > 0 {
 		fsub = fmt.Sprintf("ON (%d chat(s))", len(c))
 	}
-	return say(fmt.Sprintf("Users: %d\nForce-subscribe: %s\nBot clients ready: %d/%d",
-		n, fsub, b.pool.ReadyCount(), len(b.pool.workers)))
+	return say(fmt.Sprintf("Users: %d\nBanned: %d\nForce-subscribe: %s\nBot clients ready: %d/%d",
+		n, b.store.CountBanned(), fsub, b.pool.ReadyCount(), len(b.pool.workers)))
 }
 
 // cmdBroadcast: reply to any message with /broadcast, or "/broadcast <text>".
@@ -419,4 +438,66 @@ func (b *Bot) runBroadcast(adminID, adminHash int64, replyID int, text string) {
 	if _, err := message.NewSender(api).To(adminPeer).Text(rctx, report); err != nil {
 		log.Printf("broadcast: report failed: %v (%s)", err, report)
 	}
+}
+
+// logUpload posts the sender's details into BIN_CHANNEL, right after the file
+// that was copied there, so an admin can review it and /ban the sender.
+func (b *Bot) logUpload(ctx context.Context, api *tg.Client, ch *tg.InputChannel, user *tg.User, meta fileMeta, binID int) {
+	name := strings.TrimSpace(user.FirstName + " " + user.LastName)
+	if name == "" {
+		name = "(no name)"
+	}
+	uname := "none"
+	if user.Username != "" {
+		uname = "@" + user.Username
+	}
+	text := fmt.Sprintf("New file (message #%d)\nFrom: %s\nUsername: %s\nUser ID: %d\nFile: %s (%s)\n\nBan: /ban %d",
+		binID, name, uname, user.ID, meta.Name, humanSize(meta.Size), user.ID)
+
+	peer := &tg.InputPeerChannel{ChannelID: ch.ChannelID, AccessHash: ch.AccessHash}
+	if _, err := message.NewSender(api).To(peer).Text(ctx, text); err != nil {
+		log.Printf("bot: could not post sender details: %v", err)
+	}
+}
+
+// cmdBan: /ban <user_id> [reason]
+func (b *Bot) cmdBan(ctx context.Context, say func(string) error, rest string) error {
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return say("Usage: /ban <user_id> [reason]")
+	}
+	id, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil || id <= 0 {
+		return say("Invalid user id.\n\nUsage: /ban <user_id> [reason]")
+	}
+	if b.isAdmin(id) {
+		return say("You cannot ban an admin.")
+	}
+	reason := strings.Join(fields[1:], " ")
+	if err := b.store.Ban(ctx, id, reason); err != nil {
+		log.Printf("db: ban %d: %v", id, err)
+		return say("Database error, please try again.")
+	}
+	return say(fmt.Sprintf("User %d is banned.", id))
+}
+
+// cmdUnban: /unban <user_id>
+func (b *Bot) cmdUnban(ctx context.Context, say func(string) error, rest string) error {
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return say("Usage: /unban <user_id>")
+	}
+	id, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil || id <= 0 {
+		return say("Invalid user id.\n\nUsage: /unban <user_id>")
+	}
+	was, err := b.store.Unban(ctx, id)
+	if err != nil {
+		log.Printf("db: unban %d: %v", id, err)
+		return say("Database error, please try again.")
+	}
+	if !was {
+		return say(fmt.Sprintf("User %d was not banned.", id))
+	}
+	return say(fmt.Sprintf("User %d is unbanned.", id))
 }

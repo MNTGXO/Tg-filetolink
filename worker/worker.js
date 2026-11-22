@@ -1,7 +1,7 @@
 // Cloudflare Worker edge proxy for the Go MTProto streaming backend on Koyeb.
 //
 // Routes:
-//   GET|HEAD /dl/<message_id>?exp=<unix>&hash=<hex hmac>[&inline=1]  -> verified, streamed from backend
+//   GET|HEAD /dl/<message_id>?exp=<unix>&hash=<hex hmac>  -> verified, streamed from backend
 //   GET      /health                                      -> worker liveness
 //
 // Secrets (wrangler secret put): HMAC_SECRET, WORKER_SECRET
@@ -120,9 +120,7 @@ export default {
       return text("Link expired. Send the file to the bot again for a new link.", 410);
     }
 
-    const backendUrl =
-      `${env.BACKEND_URL.replace(/\/+$/, "")}/stream/${id}` +
-      (url.searchParams.get("inline") === "1" ? "?inline=1" : "");
+    const backendUrl = `${env.BACKEND_URL.replace(/\/+$/, "")}/stream/${id}`;
 
     const headers = new Headers({ "X-Worker-Secret": env.WORKER_SECRET });
     for (const name of PASS_THROUGH_REQUEST_HEADERS) {

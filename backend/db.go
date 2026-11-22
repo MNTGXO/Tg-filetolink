@@ -36,9 +36,11 @@ type Store struct {
 	client   *mongo.Client
 	users    *mongo.Collection
 	settings *mongo.Collection
+	bans     *mongo.Collection
 
-	mu   sync.RWMutex
-	fsub []FsubChat
+	mu     sync.RWMutex
+	fsub   []FsubChat
+	banned map[int64]struct{}
 }
 
 // OpenStore connects, verifies the connection and loads the fsub list.
@@ -65,6 +67,8 @@ func OpenStore(ctx context.Context, uri, dbName string) (*Store, error) {
 		client:   client,
 		users:    db.Collection("users"),
 		settings: db.Collection("settings"),
+		bans:     db.Collection("banned"),
+		banned:   make(map[int64]struct{}),
 	}
 
 	var doc fsubDoc
@@ -74,7 +78,68 @@ func OpenStore(ctx context.Context, uri, dbName string) (*Store, error) {
 		return nil, err
 	}
 	s.fsub = doc.Chats
+
+	cur, err := s.bans.Find(ctx, bson.D{})
+	if err != nil {
+		_ = client.Disconnect(context.Background())
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	for cur.Next(ctx) {
+		var b struct {
+			ID int64 `bson:"_id"`
+		}
+		if err := cur.Decode(&b); err == nil {
+			s.banned[b.ID] = struct{}{}
+		}
+	}
+	if err := cur.Err(); err != nil {
+		_ = client.Disconnect(context.Background())
+		return nil, err
+	}
 	return s, nil
+}
+
+// IsBanned is an in-memory lookup (the ban list is cached at startup).
+func (s *Store) IsBanned(id int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.banned[id]
+	return ok
+}
+
+func (s *Store) CountBanned() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.banned)
+}
+
+// Ban blocks a user from using the bot.
+func (s *Store) Ban(ctx context.Context, id int64, reason string) error {
+	_, err := s.bans.UpdateOne(ctx,
+		bson.M{"_id": id},
+		bson.M{"$set": bson.M{"reason": reason, "at": time.Now().UTC()}},
+		options.Update().SetUpsert(true),
+	)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.banned[id] = struct{}{}
+	s.mu.Unlock()
+	return nil
+}
+
+// Unban lifts a ban; it reports whether the user was banned.
+func (s *Store) Unban(ctx context.Context, id int64) (bool, error) {
+	res, err := s.bans.DeleteOne(ctx, bson.M{"_id": id})
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	delete(s.banned, id)
+	s.mu.Unlock()
+	return res.DeletedCount > 0, nil
 }
 
 func (s *Store) Close() {
